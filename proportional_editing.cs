@@ -16,8 +16,6 @@ namespace MeshEditing
         
         // Selection
         private int selectedVertexIndex = -1;
-        private int selectedEdgeIndex = -1;
-        private Vector2 selectedEdgeVertices = Vector2.zero;
         private bool isSelectingVertex = true;
         
         // Proportional editing settings
@@ -84,13 +82,6 @@ namespace MeshEditing
             
             EditorGUILayout.Space();
             
-            // Selection mode
-            EditorGUILayout.LabelField("Selection Mode", EditorStyles.boldLabel);
-            isSelectingVertex = EditorGUILayout.Toggle("Select Vertices", isSelectingVertex);
-            EditorGUILayout.Toggle("Select Edges", !isSelectingVertex);
-            
-            EditorGUILayout.Space();
-            
             // Proportional editing settings
             EditorGUILayout.LabelField("Proportional Editing Settings", EditorStyles.boldLabel);
             influenceRadius = EditorGUILayout.FloatField("Influence Radius", influenceRadius);
@@ -114,8 +105,6 @@ namespace MeshEditing
                 EditorGUILayout.LabelField($"Editing: {selectedObject.name}");
                 if (selectedVertexIndex >= 0)
                     EditorGUILayout.LabelField($"Selected Vertex: {selectedVertexIndex}");
-                else if (selectedEdgeIndex >= 0)
-                    EditorGUILayout.LabelField($"Selected Edge: {selectedEdgeIndex}");
             }
             
             EditorGUILayout.Space();
@@ -164,7 +153,6 @@ namespace MeshEditing
                 selectedObject = null;
                 meshFilter = null;
                 selectedVertexIndex = -1;
-                selectedEdgeIndex = -1;
             }
             
             isActive = false;
@@ -192,7 +180,7 @@ namespace MeshEditing
                 DrawWireframe(transform);
             
             // Draw influence area
-            if (selectedVertexIndex >= 0 || selectedEdgeIndex >= 0)
+            if (selectedVertexIndex >= 0)
                 DrawInfluenceArea(transform);
             
             // Handle selection and editing
@@ -239,13 +227,6 @@ namespace MeshEditing
                 Vector3 vertexPos = transform.TransformPoint(workingMesh.vertices[selectedVertexIndex]);
                 Handles.SphereHandleCap(0, vertexPos, Quaternion.identity, 0.1f, EventType.Repaint);
             }
-            else if (selectedEdgeIndex >= 0)
-            {
-                Vector3[] vertices = workingMesh.vertices;
-                Vector3 v0 = transform.TransformPoint(vertices[(int)selectedEdgeVertices.x]);
-                Vector3 v1 = transform.TransformPoint(vertices[(int)selectedEdgeVertices.y]);
-                Handles.DrawLine(v0, v1, 3.0f);
-            }
         }
         
         private Vector3 GetSelectionCenter(Transform transform)
@@ -253,13 +234,6 @@ namespace MeshEditing
             if (selectedVertexIndex >= 0)
             {
                 return transform.TransformPoint(workingMesh.vertices[selectedVertexIndex]);
-            }
-            else if (selectedEdgeIndex >= 0)
-            {
-                Vector3[] vertices = workingMesh.vertices;
-                Vector3 v0 = vertices[(int)selectedEdgeVertices.x];
-                Vector3 v1 = vertices[(int)selectedEdgeVertices.y];
-                return transform.TransformPoint((v0 + v1) * 0.5f);
             }
             return Vector3.zero;
         }
@@ -277,7 +251,7 @@ namespace MeshEditing
                         GUIUtility.hotControl = controlID;
                         e.Use();
                     }
-                    else if (e.button == 0 && e.shift && (selectedVertexIndex >= 0 || selectedEdgeIndex >= 0))
+                    else if (e.button == 0 && e.shift && (selectedVertexIndex >= 0))
                     {
                         StartProportionalEdit(e, transform);
                         GUIUtility.hotControl = controlID;
@@ -308,17 +282,8 @@ namespace MeshEditing
         private void HandleSelection(Event e, Transform transform)
         {
             Ray ray = HandleUtility.GUIPointToWorldRay(e.mousePosition);
-            
-            if (isSelectingVertex)
-            {
-                selectedVertexIndex = GetClosestVertex(ray, transform);
-                selectedEdgeIndex = -1;
-            }
-            else
-            {
-                selectedEdgeIndex = GetClosestEdge(ray, transform, out selectedEdgeVertices);
-                selectedVertexIndex = -1;
-            }
+
+            selectedVertexIndex = GetClosestVertex(ray, transform);
             
             SceneView.RepaintAll();
         }
@@ -342,49 +307,6 @@ namespace MeshEditing
             }
             
             return closestIndex;
-        }
-        
-        private int GetClosestEdge(Ray ray, Transform transform, out Vector2 edgeVertices)
-        {
-            edgeVertices = Vector2.zero;
-            Vector3[] vertices = workingMesh.vertices;
-            int[] triangles = workingMesh.triangles;
-            
-            float closestDistance = float.MaxValue;
-            int closestEdge = -1;
-            
-            HashSet<Vector2> processedEdges = new HashSet<Vector2>();
-            
-            for (int i = 0; i < triangles.Length; i += 3)
-            {
-                // Check all three edges of the triangle
-                for (int j = 0; j < 3; j++)
-                {
-                    int v0 = triangles[i + j];
-                    int v1 = triangles[i + (j + 1) % 3];
-                    
-                    Vector2 edge = new Vector2(Mathf.Min(v0, v1), Mathf.Max(v0, v1));
-                    if (processedEdges.Contains(edge))
-                        continue;
-                    
-                    processedEdges.Add(edge);
-                    
-                    Vector3 worldV0 = transform.TransformPoint(vertices[v0]);
-                    Vector3 worldV1 = transform.TransformPoint(vertices[v1]);
-                    
-                    Vector3 closestPoint = GetClosestPointOnLineSegment(ray.origin, worldV0, worldV1);
-                    float distance = Vector3.Distance(ray.origin, closestPoint);
-                    
-                    if (distance < closestDistance && distance < 0.5f)
-                    {
-                        closestDistance = distance;
-                        closestEdge = processedEdges.Count - 1;
-                        edgeVertices = edge;
-                    }
-                }
-            }
-            
-            return closestEdge;
         }
         
         private Vector3 GetClosestPointOnLineSegment(Vector3 point, Vector3 lineStart, Vector3 lineEnd)
