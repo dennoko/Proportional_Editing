@@ -16,7 +16,7 @@ namespace MeshEditing
         
         // Selection
         private int selectedVertexIndex = -1;
-        private bool isSelectingVertex = true;
+        // private bool isSelectingVertex = true; // Replaced by combined logic
         
         // Proportional editing settings
         private float influenceRadius = 2.0f;
@@ -32,8 +32,13 @@ namespace MeshEditing
         // Internal state
         private Vector2 dragStartPos;
         private bool isDragging = false;
-        private Vector3[] originalVertices;
-        
+        private Vector3[] originalVertices; // This seems to be for the original mesh state, keep it.
+        private Vector3[] verticesAtDragStart; // Vertices state at the beginning of a drag operation
+        private Vector3 dragInitialSelectedVertexPosition; // Position of the selected vertex when drag began
+        private Vector3 lastDragAppliedPosition; // Last calculated target position for the selected vertex during a drag
+        private const float scrollWheelSensitivity = 0.1f; // Sensitivity for influence radius adjustment
+        private bool isProcessingMouseDrag = false; // Flag to manage drag state more explicitly
+
         public enum AxisConstraint
         {
             X, Y, Z
@@ -49,6 +54,9 @@ namespace MeshEditing
         {
             SceneView.duringSceneGui += OnSceneGUI;
             Undo.undoRedoPerformed += OnUndoRedo;
+            selectedVertexIndex = -1; // Ensure reset on enable
+            isDragging = false;
+            // isSelectingVertex = true; // Ensure reset
         }
         
         private void OnDisable()
@@ -156,6 +164,9 @@ namespace MeshEditing
             }
             
             isActive = false;
+            isDragging = false;
+            // isSelectingVertex = true;
+            verticesAtDragStart = null;
             SceneView.RepaintAll();
         }
         
@@ -163,7 +174,10 @@ namespace MeshEditing
         {
             if (isActive && workingMesh)
             {
+                // workingMesh, influenceRadius, and lastDragAppliedPosition (if 'this' was recorded)
+                // are automatically reverted by Unity's Undo system.
                 SceneView.RepaintAll();
+                Repaint(); // Repaint this EditorWindow to reflect changes like influenceRadius in its GUI
             }
         }
         
@@ -173,22 +187,127 @@ namespace MeshEditing
                 return;
             
             Event e = Event.current;
-            Transform transform = selectedObject.transform;
-            
+            Transform objectTransform = selectedObject.transform;
+            int controlID = GUIUtility.GetControlID(FocusType.Passive);
+
             // Draw wireframe
             if (showWireframe)
-                DrawWireframe(transform);
+                DrawWireframe(objectTransform);
             
             // Draw influence area
             if (selectedVertexIndex >= 0)
-                DrawInfluenceArea(transform);
+                DrawInfluenceArea(objectTransform); // Ensure this method uses current influenceRadius
+
+            // Handle vertex picking if not currently dragging
+            if (!isDragging && e.type == EventType.MouseDown && e.button == 0)
+            {
+                int pickedIndex = PickVertex(e.mousePosition, objectTransform);
+                if (pickedIndex != -1)
+                {
+                    selectedVertexIndex = pickedIndex;
+                    Repaint(); // Update GUI to show selected vertex
+                    e.Use();
+                }
+                // If clicked on empty space, could implement deselection here:
+                // else { selectedVertexIndex = -1; Repaint(); }
+            }
             
-            // Handle selection and editing
-            HandleMouseEvents(e, transform);
+            switch (e.GetTypeForControl(controlID))
+            {
+                case EventType.MouseDown:
+                    if (e.button == 0 && selectedVertexIndex != -1 && !isDragging)
+                    {
+                        // Check if the click is reasonably close to the selected vertex to start drag
+                        // For simplicity, we assume any mousedown when a vertex is selected and not dragging, starts a drag.
+                        GUIUtility.hotControl = controlID;
+                        isDragging = true;
+                        isProcessingMouseDrag = false; // Will be set true on first actual drag motion
+                        dragStartPos = e.mousePosition; // Screen position
+                        
+                        verticesAtDragStart = workingMesh.vertices.ToArray();
+                        dragInitialSelectedVertexPosition = verticesAtDragStart[selectedVertexIndex];
+                        lastDragAppliedPosition = dragInitialSelectedVertexPosition;
+
+                        // Undo.RegisterCompleteObjectUndo(workingMesh, "Begin Proportional Edit");
+                        Undo.RecordObjects(new Object[] { workingMesh, this }, "Begin Proportional Edit");
+                        e.Use();
+                    }
+                    break;
+
+                case EventType.MouseUp:
+                    if (e.button == 0 && GUIUtility.hotControl == controlID)
+                    {
+                        GUIUtility.hotControl = 0;
+                        if (isDragging)
+                        {
+                            // If there was any drag processing, ensure the final state is applied.
+                            // This might be redundant if MouseDrag always applies, but good for safety.
+                            // if(isProcessingMouseDrag) {
+                            // ApplyProportionalEditFromDrag(e, objectTransform, true); // Apply final position
+                            // }
+                            isDragging = false;
+                            isProcessingMouseDrag = false;
+                            verticesAtDragStart = null; // Clear at the end of a drag operation
+                            e.Use();
+                            SceneView.RepaintAll();
+                        }
+                    }
+                    break;
+
+                case EventType.MouseDrag:
+                    if (GUIUtility.hotControl == controlID && isDragging && selectedVertexIndex != -1)
+                    {
+                        isProcessingMouseDrag = true; // Mark that actual dragging has occurred
+                        // Undo.RegisterCompleteObjectUndo(workingMesh, "Proportional Edit Drag");
+                        Undo.RecordObjects(new Object[] { workingMesh, this }, "Proportional Edit Drag");
+                        ApplyProportionalEditFromDrag(e, objectTransform, false);
+                        e.Use();
+                        // SceneView.RepaintAll(); // Repaint is handled by sceneView.Repaint() below
+                    }
+                    break;
+
+                case EventType.ScrollWheel:
+                    if (isDragging && e.shift && selectedVertexIndex != -1)
+                    {
+                        // Undo.RegisterCompleteObjectUndo(workingMesh, "Adjust Influence Radius");
+                        Undo.RecordObjects(new Object[] { workingMesh, this }, "Adjust Influence Radius");
+                        influenceRadius -= e.delta.y * scrollWheelSensitivity;
+                        influenceRadius = Mathf.Max(0.01f, influenceRadius);
+                        Repaint(); // For the EditorWindow GUI to update radius field
+
+                        ApplyProportionalEditAfterRadiusChange(objectTransform);
+                        e.Use();
+                        // SceneView.RepaintAll(); // Repaint is handled by sceneView.Repaint() below
+                    }
+                    break;
+                
+                case EventType.Layout:
+                    // Allow default controls (like selection) when not dragging or when hotControl is not this tool
+                    if (GUIUtility.hotControl == 0 || GUIUtility.hotControl == controlID)
+                         HandleUtility.AddDefaultControl(controlID);
+                    break;
+            }
             
-            // Force scene view to repaint during dragging
-            if (isDragging)
+            // Remove the old HandleMouseEvents call
+            // HandleMouseEvents(e, transform); 
+            
+            // Force scene view to repaint during dragging or if changes occurred
+            if (isDragging || e.type == EventType.ScrollWheel && e.shift || (e.type == EventType.MouseUp && GUIUtility.hotControl == 0) )
                 sceneView.Repaint();
+        }
+
+        // Placeholder for DrawInfluenceArea if it needs to be updated or added
+        private void DrawInfluenceArea(Transform transform)
+        {
+            if (selectedVertexIndex < 0 || selectedVertexIndex >= workingMesh.vertexCount) return;
+
+            Handles.color = influenceColor;
+            Vector3 worldPos = transform.TransformPoint(workingMesh.vertices[selectedVertexIndex]);
+            Handles.DrawWireDisc(worldPos, SceneView.currentDrawingSceneView.camera.transform.forward, influenceRadius);
+            // Consider drawing a sphere in 3D space if appropriate:
+            // Handles.DrawWireArc(worldPos, transform.up, -transform.right, 360, influenceRadius);
+            // Handles.DrawWireArc(worldPos, transform.right, transform.up, 360, influenceRadius);
+            // Handles.DrawWireArc(worldPos, transform.forward, transform.right, 360, influenceRadius);
         }
         
         private void DrawWireframe(Transform transform)
@@ -210,25 +329,6 @@ namespace MeshEditing
             }
         }
         
-        private void DrawInfluenceArea(Transform transform)
-        {
-            Vector3 center = GetSelectionCenter(transform);
-            
-            // Draw influence sphere
-            Handles.color = influenceColor;
-            Handles.DrawWireDisc(center, transform.up, influenceRadius);
-            Handles.DrawWireDisc(center, transform.right, influenceRadius);
-            Handles.DrawWireDisc(center, transform.forward, influenceRadius);
-            
-            // Draw selected element
-            Handles.color = selectedColor;
-            if (selectedVertexIndex >= 0)
-            {
-                Vector3 vertexPos = transform.TransformPoint(workingMesh.vertices[selectedVertexIndex]);
-                Handles.SphereHandleCap(0, vertexPos, Quaternion.identity, 0.1f, EventType.Repaint);
-            }
-        }
-        
         private Vector3 GetSelectionCenter(Transform transform)
         {
             if (selectedVertexIndex >= 0)
@@ -238,173 +338,127 @@ namespace MeshEditing
             return Vector3.zero;
         }
         
-        private void HandleMouseEvents(Event e, Transform transform)
+        // Add PickVertex, ApplyProportionalEditFromDrag, ApplyProportionalEditAfterRadiusChange, PerformVertexUpdate methods here
+        private int PickVertex(Vector2 mouseGuiPosition, Transform objectTransform)
         {
-            int controlID = GUIUtility.GetControlID(FocusType.Passive);
-            
-            switch (e.type)
-            {
-                case EventType.MouseDown:
-                    if (e.button == 0 && !e.shift)
-                    {
-                        HandleSelection(e, transform);
-                        GUIUtility.hotControl = controlID;
-                        e.Use();
-                    }
-                    else if (e.button == 0 && e.shift && (selectedVertexIndex >= 0))
-                    {
-                        StartProportionalEdit(e, transform);
-                        GUIUtility.hotControl = controlID;
-                        e.Use();
-                    }
-                    break;
-                    
-                case EventType.MouseDrag:
-                    if (GUIUtility.hotControl == controlID && isDragging)
-                    {
-                        UpdateProportionalEdit(e, transform);
-                        e.Use();
-                    }
-                    break;
-                    
-                case EventType.MouseUp:
-                    if (GUIUtility.hotControl == controlID)
-                    {
-                        if (isDragging)
-                            FinishProportionalEdit();
-                        GUIUtility.hotControl = 0;
-                        e.Use();
-                    }
-                    break;
-            }
-        }
-        
-        private void HandleSelection(Event e, Transform transform)
-        {
-            Ray ray = HandleUtility.GUIPointToWorldRay(e.mousePosition);
+            float pickDistanceThresholdPixels = 15f; // Screen space pixel radius for picking
+            int closestVertex = -1;
+            float minSqrDistance = pickDistanceThresholdPixels * pickDistanceThresholdPixels;
 
-            selectedVertexIndex = GetClosestVertex(ray, transform);
-            
-            SceneView.RepaintAll();
-        }
-        
-        private int GetClosestVertex(Ray ray, Transform transform)
-        {
+            if (workingMesh == null) return -1;
             Vector3[] vertices = workingMesh.vertices;
-            float closestDistance = float.MaxValue;
-            int closestIndex = -1;
-            
+
             for (int i = 0; i < vertices.Length; i++)
             {
-                Vector3 worldPos = transform.TransformPoint(vertices[i]);
-                float distance = HandleUtility.DistancePointLine(worldPos, ray.origin, ray.origin + ray.direction * 1000f);
-                
-                if (distance < closestDistance && distance < 0.5f)
+                Vector3 worldPos = objectTransform.TransformPoint(vertices[i]);
+                Vector3 screenPos = HandleUtility.WorldToGUIPoint(worldPos);
+
+                // Ensure the vertex is in front of the camera and within the view
+                if (screenPos.z < 0) continue; // Behind camera
+
+                Rect screenRect = SceneView.currentDrawingSceneView.position;
+                if (!screenRect.Contains(screenPos)) continue; // Outside view
+
+                float sqrDist = (screenPos - mouseGuiPosition).sqrMagnitude;
+                if (sqrDist < minSqrDistance)
                 {
-                    closestDistance = distance;
-                    closestIndex = i;
+                    minSqrDistance = sqrDist;
+                    closestVertex = i;
                 }
             }
-            
-            return closestIndex;
+            return closestVertex;
         }
-        
-        private Vector3 GetClosestPointOnLineSegment(Vector3 point, Vector3 lineStart, Vector3 lineEnd)
+
+        private void ApplyProportionalEditFromDrag(Event e, Transform objectTransform, bool isFinalAdjustment)
         {
-            Vector3 lineDirection = lineEnd - lineStart;
-            float lineLength = lineDirection.magnitude;
-            lineDirection.Normalize();
-            
-            Vector3 pointDirection = point - lineStart;
-            float t = Vector3.Dot(pointDirection, lineDirection);
-            t = Mathf.Clamp(t, 0f, lineLength);
-            
-            return lineStart + lineDirection * t;
-        }
-        
-        private void StartProportionalEdit(Event e, Transform transform)
-        {
-            Undo.RecordObject(meshFilter, "Proportional Edit");
-            originalVertices = workingMesh.vertices.Clone() as Vector3[];
-            dragStartPos = e.mousePosition;
-            isDragging = true;
-        }
-        
-        private void UpdateProportionalEdit(Event e, Transform transform)
-        {
-            Vector2 mouseDelta = e.mousePosition - (Vector2)dragStartPos;
-            Vector3 selectionCenter = GetSelectionCenter(transform);
-            
-            // Convert mouse delta to world space movement
-            Vector3 worldDelta = GetWorldDeltaFromMouseDelta(mouseDelta, selectionCenter);
-            
-            // Apply axis constraint
-            worldDelta = ApplyAxisConstraint(worldDelta);
-            
-            // Apply proportional editing
-            ApplyProportionalEditing(transform, worldDelta);
-            
-            // Update mesh
-            workingMesh.vertices = workingMesh.vertices;
-            workingMesh.RecalculateNormals();
-            workingMesh.RecalculateBounds();
-        }
-        
-        private Vector3 GetWorldDeltaFromMouseDelta(Vector2 mouseDelta, Vector3 worldPos)
-        {
-            Camera sceneCamera = SceneView.lastActiveSceneView.camera;
-            Vector3 screenPos = sceneCamera.WorldToScreenPoint(worldPos);
-            screenPos.x += mouseDelta.x;
-            screenPos.y -= mouseDelta.y; // Flip Y because screen coordinates are inverted
-            
-            Vector3 newWorldPos = sceneCamera.ScreenToWorldPoint(screenPos);
-            return newWorldPos - worldPos;
-        }
-        
-        private Vector3 ApplyAxisConstraint(Vector3 delta)
-        {
+            if (selectedVertexIndex < 0 || verticesAtDragStart == null) return;
+
+            Ray mouseRay = HandleUtility.GUIPointToWorldRay(e.mousePosition);
+            Plane editPlane;
+            Vector3 planeNormal;
+            Vector3 selectedVertexOriginalWorldPos = objectTransform.TransformPoint(dragInitialSelectedVertexPosition);
+
+            // Determine plane based on axis constraint
+            // The plane passes through the vertex's original position at drag start, normal to the constraint axis
             switch (axisConstraint)
             {
-                case AxisConstraint.X:
-                    return new Vector3(delta.x, 0, 0);
-                case AxisConstraint.Y:
-                    return new Vector3(0, delta.y, 0);
-                case AxisConstraint.Z:
-                    return new Vector3(0, 0, delta.z);
-                default:
-                    return delta;
+                case AxisConstraint.X: planeNormal = objectTransform.right; break;
+                case AxisConstraint.Y: planeNormal = objectTransform.up; break;
+                case AxisConstraint.Z: planeNormal = objectTransform.forward; break;
+                default: planeNormal = SceneView.currentDrawingSceneView.camera.transform.forward; break; // Fallback
             }
-        }
-        
-        private void ApplyProportionalEditing(Transform transform, Vector3 delta)
-        {
-            Vector3 selectionCenter = transform.InverseTransformPoint(GetSelectionCenter(transform));
-            Vector3[] vertices = workingMesh.vertices;
-            Vector3 localDelta = transform.InverseTransformDirection(delta);
-            
-            for (int i = 0; i < vertices.Length; i++)
+            editPlane = new Plane(planeNormal, selectedVertexOriginalWorldPos);
+
+            float enter;
+            if (editPlane.Raycast(mouseRay, out enter))
             {
-                float distance = Vector3.Distance(vertices[i], selectionCenter);
+                Vector3 worldHitPoint = mouseRay.GetPoint(enter);
+                Vector3 localHitPoint = objectTransform.InverseTransformPoint(worldHitPoint);
                 
-                if (distance <= influenceRadius)
+                Vector3 displacementFromOriginalStart = localHitPoint - dragInitialSelectedVertexPosition;
+                Vector3 constrainedDisplacement = Vector3.zero;
+
+                switch (axisConstraint)
                 {
-                    float influence = falloffCurve.Evaluate(distance / influenceRadius);
-                    vertices[i] = originalVertices[i] + localDelta * influence;
+                    case AxisConstraint.X: constrainedDisplacement.x = displacementFromOriginalStart.x; break;
+                    case AxisConstraint.Y: constrainedDisplacement.y = displacementFromOriginalStart.y; break;
+                    case AxisConstraint.Z: constrainedDisplacement.z = displacementFromOriginalStart.z; break;
                 }
-                else
-                {
-                    vertices[i] = originalVertices[i];
-                }
+                
+                Vector3 newSelectedVertexPos = dragInitialSelectedVertexPosition + constrainedDisplacement;
+                lastDragAppliedPosition = newSelectedVertexPos;
+
+                PerformVertexUpdate(newSelectedVertexPos);
             }
-            
-            workingMesh.vertices = vertices;
         }
-        
-        private void FinishProportionalEdit()
+
+        private void ApplyProportionalEditAfterRadiusChange(Transform objectTransform)
         {
-            isDragging = false;
-            originalVertices = null;
-            EditorUtility.SetDirty(selectedObject);
+            // Re-apply the edit using the last known dragged position of the selected vertex
+            // and the new influenceRadius.
+            PerformVertexUpdate(lastDragAppliedPosition);
+        }
+
+        private void PerformVertexUpdate(Vector3 selectedVertexTargetLocalPos)
+        {
+            if (selectedVertexIndex < 0 || verticesAtDragStart == null) return;
+
+            Vector3[] newVertices = verticesAtDragStart.ToArray(); // Always start from the state at drag begin
+
+            Vector3 primaryVertexDisplacementFromDragStart = selectedVertexTargetLocalPos - dragInitialSelectedVertexPosition;
+            newVertices[selectedVertexIndex] = selectedVertexTargetLocalPos;
+
+            for (int i = 0; i < newVertices.Length; i++)
+            {
+                if (i == selectedVertexIndex) continue;
+
+                float dist = Vector3.Distance(verticesAtDragStart[i], dragInitialSelectedVertexPosition);
+                if (dist < influenceRadius)
+                {
+                    float weight = falloffCurve.Evaluate(dist / influenceRadius);
+                    Vector3 displacementToApply = primaryVertexDisplacementFromDragStart;
+
+                    // Constrain the displacement for other vertices along the same axis
+                    switch (axisConstraint)
+                    {
+                        case AxisConstraint.X:
+                            displacementToApply.y = 0; displacementToApply.z = 0;
+                            break;
+                        case AxisConstraint.Y:
+                            displacementToApply.x = 0; displacementToApply.z = 0;
+                            break;
+                        case AxisConstraint.Z:
+                            displacementToApply.x = 0; displacementToApply.y = 0;
+                            break;
+                    }
+                    newVertices[i] = verticesAtDragStart[i] + displacementToApply * weight;
+                }
+                // else: vertex remains as it was in verticesAtDragStart
+            }
+
+            workingMesh.vertices = newVertices;
+            workingMesh.RecalculateNormals();
+            workingMesh.RecalculateBounds();
         }
     }
 }
