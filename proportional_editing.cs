@@ -131,7 +131,7 @@ namespace MeshEditing
                 MessageType.Info);
         }
         
-        private void ActivateTool()
+        private void ActivateTool() // if the game object is selected and has a MeshFilter compornent, activate the tool, then create a working copy of the mesh
         {
             if (Selection.activeGameObject?.GetComponent<MeshFilter>() != null)
             {
@@ -152,7 +152,7 @@ namespace MeshEditing
             }
         }
         
-        private void DeactivateTool()
+        private void DeactivateTool() // when the tool is deactivated, clean up the mesh and reset the state
         {
             if (isActive && selectedObject && meshFilter)
             {
@@ -171,7 +171,7 @@ namespace MeshEditing
             SceneView.RepaintAll();
         }
         
-        private void OnUndoRedo()
+        private void OnUndoRedo() // when an undo or redo operation is performed, repaint the scene view to reflect changes
         {
             if (isActive && workingMesh)
             {
